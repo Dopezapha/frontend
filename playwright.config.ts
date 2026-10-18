@@ -16,7 +16,8 @@ const useProductionServer = process.env.E2E_PRODUCTION_SERVER === 'true'
 const productionPort = Number(process.env.E2E_PRODUCTION_PORT) || 3200
 const port = isProductionCSP ? productionPort : useProductionServer ? 3001 : 3000
 const baseURL = `http://localhost:${port}`
-const runner = process.env.npm_execpath && process.env.npm_execpath.includes('bun') ? 'bun run' : 'npm run'
+const runner =
+  process.env.npm_execpath && process.env.npm_execpath.includes('bun') ? 'bun run' : 'npm run'
 
 export default defineConfig({
   testDir: './e2e',

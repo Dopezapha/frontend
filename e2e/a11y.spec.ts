@@ -14,7 +14,11 @@ const KNOWN_VIOLATIONS: Record<string, string> = {
   'color-contrast': 'https://github.com/Heliobond/frontend/issues/467',
 }
 
-async function seedSession(page: import('@playwright/test').Page, theme: 'light' | 'dark', seedWallet: boolean) {
+async function seedSession(
+  page: import('@playwright/test').Page,
+  theme: 'light' | 'dark',
+  seedWallet: boolean,
+) {
   await page.addInitScript(
     ({ address, shouldSeedWallet, selectedTheme }) => {
       localStorage.setItem('hb-theme', selectedTheme)
@@ -42,7 +46,9 @@ test.describe('Automated Axe Accessibility Audit', () => {
   for (const theme of themes) {
     test.describe(`Theme: ${theme}`, () => {
       for (const route of allTargetRoutes) {
-        test(`route ${route.path} meets WCAG standards in ${theme} mode`, async ({ page }, testInfo) => {
+        test(`route ${route.path} meets WCAG standards in ${theme} mode`, async ({
+          page,
+        }, testInfo) => {
           await seedSession(page, theme, route.needsAuth)
           await page.goto(route.path)
           await page.waitForLoadState('networkidle')
@@ -52,10 +58,13 @@ test.describe('Automated Axe Accessibility Audit', () => {
             .exclude('canvas')
             .analyze()
 
-          await testInfo.attach(`axe-results-${route.path.replace(/\//g, '_') || 'root'}-${theme}`, {
-            body: JSON.stringify(results, null, 2),
-            contentType: 'application/json',
-          })
+          await testInfo.attach(
+            `axe-results-${route.path.replace(/\//g, '_') || 'root'}-${theme}`,
+            {
+              body: JSON.stringify(results, null, 2),
+              contentType: 'application/json',
+            },
+          )
 
           const criticalAndSeriousViolations = results.violations.filter(
             (v) => (v.impact === 'serious' || v.impact === 'critical') && !KNOWN_VIOLATIONS[v.id],
@@ -65,7 +74,11 @@ test.describe('Automated Axe Accessibility Audit', () => {
             criticalAndSeriousViolations,
             `Unallowlisted accessibility violations detected on ${route.path} (${theme} mode): ` +
               JSON.stringify(
-                criticalAndSeriousViolations.map((v) => ({ id: v.id, impact: v.impact, help: v.help })),
+                criticalAndSeriousViolations.map((v) => ({
+                  id: v.id,
+                  impact: v.impact,
+                  help: v.help,
+                })),
                 null,
                 2,
               ),

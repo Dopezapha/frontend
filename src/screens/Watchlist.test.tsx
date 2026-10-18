@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@/test/render'
 import { Watchlist } from './Watchlist'
 import { WATCHLIST_STORAGE_KEY } from '@/lib/watchlist'
+import type { ProjectDetail } from '@/data/projectDetails'
 
 describe('Watchlist screen', () => {
   beforeEach(() => localStorage.clear())
@@ -26,26 +27,28 @@ describe('Watchlist screen', () => {
 
   it('renders a watchlisted project with id > 100', async () => {
     localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify([105]))
-    const spy = vi.spyOn(await import('@/lib/api'), 'getProject').mockImplementation((id: number) => {
-      if (id === 105) {
-        return Promise.resolve({
-          project: {
-            id: 105,
-            name: 'Kalahari High-Yield Solar',
-            location: 'Kalahari',
-            type: 'Solar',
-            credit: 92,
-            green: 88,
-            funded: '80%',
-            fundedAmount: 8000,
-            fundingGoal: 10000,
-            priceHistory: [],
-          },
-          detail: {} as any,
-        })
-      }
-      return Promise.resolve(null)
-    })
+    const spy = vi
+      .spyOn(await import('@/lib/api'), 'getProject')
+      .mockImplementation((id: number) => {
+        if (id === 105) {
+          return Promise.resolve({
+            project: {
+              id: 105,
+              name: 'Kalahari High-Yield Solar',
+              location: 'Kalahari',
+              type: 'Solar',
+              credit: 92,
+              green: 88,
+              funded: '80%',
+              fundedAmount: 8000,
+              fundingGoal: 10000,
+              priceHistory: [],
+            },
+            detail: {} as unknown as ProjectDetail,
+          })
+        }
+        return Promise.resolve(null)
+      })
 
     render(<Watchlist onOpen={vi.fn()} />)
     expect(await screen.findByText('Kalahari High-Yield Solar')).toBeInTheDocument()

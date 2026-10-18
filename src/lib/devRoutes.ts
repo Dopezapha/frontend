@@ -16,4 +16,3 @@ export function devRoutesEnabled(
   if (flag === 'false') return false
   return nodeEnv !== 'production'
 }
-

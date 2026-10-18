@@ -114,4 +114,3 @@ export function absoluteTitle(title: string): string {
 export function isPrivateRoute(path: string): boolean {
   return PRIVATE_ROUTES.includes(path)
 }
-

@@ -88,7 +88,9 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
   const remaining = isDefaultView
     ? Math.max(0, totalCount - visibleCount)
     : hasMore
-      ? (shown.length > visibleCount ? shown.length - visibleCount : Math.min(PAGE_SIZE, Math.max(0, total - projects.length)))
+      ? shown.length > visibleCount
+        ? shown.length - visibleCount
+        : Math.min(PAGE_SIZE, Math.max(0, total - projects.length))
       : Math.max(0, shown.length - visibleCount)
   const nextChunk = Math.min(PAGE_SIZE, remaining > 0 ? remaining : PAGE_SIZE)
 
@@ -98,7 +100,9 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
 
   const handleLoadMore = async () => {
     const shouldFetch =
-      (visibleCount + PAGE_SIZE > projects.length || (!isDefaultView && visibleCount >= shown.length)) && hasMore
+      (visibleCount + PAGE_SIZE > projects.length ||
+        (!isDefaultView && visibleCount >= shown.length)) &&
+      hasMore
     if (shouldFetch && !loadingMore) {
       setLoadingMore(true)
       try {
@@ -322,7 +326,10 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
                   color: 'var(--ink-60)',
                 }}
               >
-                {t('showingCount', { shown: Math.min(paged.length, totalCount), total: totalCount })}
+                {t('showingCount', {
+                  shown: Math.min(paged.length, totalCount),
+                  total: totalCount,
+                })}
               </div>
               {remaining > 0 && (
                 <button

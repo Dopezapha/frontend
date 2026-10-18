@@ -26,33 +26,39 @@ export function Watchlist({ onOpen }: WatchlistProps) {
   const t = useTranslations('Watchlist')
   const { ids, remove } = useWatchlist()
   const [items, setItems] = useState<WatchlistItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(ids.length > 0)
 
   useEffect(() => {
     let active = true
-    if (ids.length === 0) {
-      setItems([])
-      setLoading(false)
-      return
+
+    async function loadWatchlist() {
+      if (ids.length === 0) {
+        if (active) {
+          setItems([])
+          setLoading(false)
+        }
+        return
+      }
+
+      setLoading(true)
+      try {
+        const resolved = await Promise.all(
+          ids.map(async (id) => {
+            try {
+              const res = await getProject(id)
+              return { id, project: res?.project ?? null }
+            } catch {
+              return { id, project: null }
+            }
+          }),
+        )
+        if (active) setItems(resolved)
+      } finally {
+        if (active) setLoading(false)
+      }
     }
 
-    setLoading(true)
-    Promise.all(
-      ids.map(async (id) => {
-        try {
-          const res = await getProject(id)
-          return { id, project: res?.project ?? null }
-        } catch {
-          return { id, project: null }
-        }
-      }),
-    )
-      .then((resolved) => {
-        if (active) setItems(resolved)
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
+    void loadWatchlist()
 
     return () => {
       active = false
