@@ -3,10 +3,11 @@
 import { useEffect, useState, type CSSProperties } from 'react'
 import { useTranslations } from 'next-intl'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { ProjectCard, Tag, WatchlistButton } from '../components'
+import { ProjectCard, Tag, WatchlistButton, DemoDataBadge } from '../components'
 import { type Project, type ProjectType } from '../data'
 import { selectProjects } from '../state/selectors'
 import { getProjectsPaginated } from '../lib/api'
+import { searchBondsByName } from '../lib/bondUtils'
 
 /**
  * Explore — a living atlas, not a shop. Grid of all registered projects with
@@ -39,7 +40,7 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
       : false,
   )
   const [page, setPage] = useState(1)
-  const [loading, setLoading] = useState(!initialProjects)
+  const [loading, setLoading] = useState(!initialProjects || initialProjects.length === 0)
   const [loadingMore, setLoadingMore] = useState(false)
   const [apiError, setApiError] = useState(false)
   const urlType = searchParams.get('type') as ProjectType | null
@@ -49,7 +50,7 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
   const [searchTerm, setSearchTerm] = useState('')
 
   useEffect(() => {
-    if (initialProjects) return
+    if (initialProjects && initialProjects.length > 0) return
     getProjectsPaginated(1, 50)
       .then((res) => {
         setProjects(res.projects)
@@ -80,9 +81,7 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
   const query = searchTerm.trim().toLowerCase()
   const isDefaultView = filter === 'All' && !query
   const filteredByType = filter === 'All' ? projects : projects.filter((p) => p.type === filter)
-  const shown = filteredByType.filter((p) =>
-    p.name.toLowerCase().includes(query) || p.location.toLowerCase().includes(query),
-  )
+  const shown = searchBondsByName(filteredByType, searchTerm)
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
   const paged = shown.slice(0, visibleCount)
   const totalCount = isDefaultView ? Math.max(total, projects.length) : shown.length
@@ -126,6 +125,7 @@ export function Explore({ onOpen, initialProjects, initialTotal }: ExploreProps)
 
   return (
     <main id="main-content" style={{ maxWidth: 1320, margin: '0 auto', padding: '48px 32px 80px' }}>
+      <DemoDataBadge style={{ marginBottom: 16 }} />
       <style>{`
         .hb-projects-grid > * {
           min-width: 0;

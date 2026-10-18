@@ -28,7 +28,9 @@ async function seedSession(page: import('@playwright/test').Page, theme: 'light'
   )
 }
 
-const publicRoutes = ROUTES.filter((r) => !(DEV_ROUTES as readonly string[]).includes(r))
+const publicRoutes = ROUTES.map((r) => r.path).filter(
+  (p) => !(DEV_ROUTES as readonly string[]).includes(p),
+)
 const allTargetRoutes: { path: string; needsAuth: boolean }[] = [
   ...publicRoutes.map((path) => ({ path, needsAuth: false })),
   ...AUTH_ROUTES.map((path) => ({ path, needsAuth: true })),

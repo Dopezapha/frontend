@@ -1,14 +1,10 @@
 'use client'
 
-import dynamic from 'next/dynamic'
 import { useTranslations } from 'next-intl'
 import { Button, StatBlock } from '../components'
 import { formatCurrency, formatNumber } from '../data'
 import { selectPoolSummary } from '../state/selectors'
-
-const LiveHelio = dynamic(() => import('../brand/LiveHelio').then((m) => m.LiveHelio), {
-  ssr: false,
-})
+import { LiveHelio } from '../brand/LiveHelio'
 
 /**
  * Landing — public hero. The live Helio dominates; three counters deep-link to
@@ -89,11 +85,7 @@ export function Landing({ onConnect, onExplore }: LandingProps) {
           }}
         >
           <div style={counterCell}>
-            <StatBlock
-              label={t('poolValue')}
-              value={formatCurrency(pool.totalAssets)}
-              size="lg"
-            />
+            <StatBlock label={t('poolValue')} value={formatCurrency(pool.totalAssets)} size="lg" />
           </div>
           <div style={counterCell}>
             <StatBlock

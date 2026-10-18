@@ -10,7 +10,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(mockSearch),
 }))
 
-vi.mock('@/lib/api', () => ({ getProjectsPaginated: vi.fn() }))
+vi.mock('@/lib/api', () => ({ getProjectsPaginated: vi.fn(), shouldShowDemoBadge: () => false }))
 
 vi.mock('../components', async () => {
   const actual = await vi.importActual<typeof import('../components')>('../components')
@@ -44,8 +44,7 @@ function makeProjects(count: number, type: ProjectType = 'Solar', offset = 0): P
 const cards = () => screen.queryAllByTestId('card')
 
 /** The "load more" control, labeled with the chunk size it will add. */
-const loadMoreButton = (count: number) =>
-  screen.getByRole('button', { name: `Show ${count} more` })
+const loadMoreButton = (count: number) => screen.getByRole('button', { name: `Show ${count} more` })
 
 describe('Explore — pagination', () => {
   beforeEach(() => {
@@ -142,7 +141,6 @@ describe('Explore — pagination', () => {
     await waitFor(() => expect(cards().length).toBe(12))
     expect(cards()[0]).toHaveTextContent('Project 21')
   })
-
   it('fetches a second page when hasMore is true and reaches all projects beyond 50', async () => {
     const user = userEvent.setup()
     const allProjects = makeProjects(60)

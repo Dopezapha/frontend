@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { useTranslations } from 'next-intl'
 import { Badge, Button, AddressChip, useToast } from '@/components'
 import {
@@ -29,78 +29,166 @@ import { OracleForms } from './OracleForms'
 import { OFF_SCREEN_PROJECTS_COUNT } from '@/data'
 import { parseFundedNum } from './utils'
 import { formatMoney as sharedFormatMoney } from '@/lib/format'
-import { formatSharePrice } from '@/wallet/vault'
+import { formatSharePrice, fetchTotalAssets, fetchUtilizationBps } from '@/wallet/vault'
+import { useWallet } from '@/wallet/WalletProvider'
+import { fetchProjectsPage } from '@/wallet/registry'
+import {
+  submitFundProject,
+  submitUpdateScores,
+  submitSetWhitelist,
+  isMultisigDeployment,
+  getAdminRoles,
+  type AdminRoles,
+} from '@/wallet/admin'
 
-/**
- * AdminConsole — the internal admin / oracle surface. Same design system as the
- * consumer app, but DENSER: tighter padding, smaller type, hairline-separated
- * rows, mono tabular numerals on every figure, and a real registry table.
- * All interactivity is local in-memory state — these stand in for privileged
- * InvestmentVault + ProjectRegistry writes. Honest, plain-language confirms.
- */
+export interface AdminConsoleProps {
+  roles?: AdminRoles
+}
 
-export function AdminConsole() {
+export function AdminConsole({ roles: propRoles }: AdminConsoleProps = {}) {
   const t = useTranslations('Admin')
   const { toast } = useToast()
+  const { address, sign } = useWallet()
   const [registry, setRegistry] = useState<RegistryEntry[]>(REGISTRY)
   const [whitelist, setWhitelist] = useState<Creator[]>(WHITELIST)
   // Vault liquid + deployed shift as the oracle funds projects.
   const [liquid, setLiquid] = useState(VAULT_STATS.liquid)
   const [deployed, setDeployed] = useState(VAULT_STATS.deployed)
+  const [isMultisig, setIsMultisig] = useState(false)
+  const [fetchedRoles, setFetchedRoles] = useState<AdminRoles | undefined>()
+
+  useEffect(() => {
+    if (propRoles) return
+    if (address) {
+      getAdminRoles(address)
+        .then(setFetchedRoles)
+        .catch(() => {})
+    }
+  }, [propRoles, address])
+
+  const roles = propRoles ?? fetchedRoles
+
+  const canFund = roles ? roles.isVaultOwner || roles.isConfiguredAdmin : true
+  const canUpdateScores = roles ? roles.isRegistryOwner || roles.isConfiguredAdmin : true
+  const canManageWhitelist = roles
+    ? roles.isWhitelister || roles.isRegistryOwner || roles.isConfiguredAdmin
+    : true
+
+  // Live contract reads on mount
+  useEffect(() => {
+    let active = true
+
+    fetchProjectsPage(0, 50, address ?? undefined)
+      .then((res) => {
+        if (!active || res.projects.length === 0) return
+        setRegistry(
+          res.projects.map((p, i) => ({
+            ...p,
+            lastVerified: REGISTRY[i]?.lastVerified ?? 'on-chain',
+          })),
+        )
+      })
+      .catch(() => {})
+
+    if (address) {
+      Promise.all([
+        fetchTotalAssets(address).catch(() => null),
+        fetchUtilizationBps(address).catch(() => null),
+        isMultisigDeployment(address).catch(() => false),
+      ]).then(([liveAssets, utilBps, multisig]) => {
+        if (!active) return
+        setIsMultisig(Boolean(multisig))
+        if (liveAssets !== null && liveAssets > 0) {
+          const bps = utilBps ?? 0
+          const liveDeployed = (liveAssets * bps) / 10000
+          const liveLiquid = liveAssets - liveDeployed
+          setLiquid(liveLiquid)
+          setDeployed(liveDeployed)
+        }
+      })
+    }
+
+    return () => {
+      active = false
+    }
+  }, [address])
 
   // The pool funds 14 projects: 6 demo projects in the registry plus 8 historical/off-screen projects.
   const fundedCount =
     registry.filter((r) => parseFundedNum(r.funded) > 0).length + OFF_SCREEN_PROJECTS_COUNT
 
-  const updateScores = (id: number, credit: number, green: number) => {
+  const updateScores = async (id: number, credit: number, green: number) => {
     setRegistry((rows) =>
       rows.map((r) => (r.id === id ? { ...r, credit, green, lastVerified: 'just now' } : r)),
     )
     const name = registry.find((r) => r.id === id)?.name ?? 'project'
-    toast({
-      tone: 'success',
-      title: t('toastScoresTitle'),
-      message: t('toastScoresMsg', { name, credit, green }),
-      duration: 5000,
-    })
+    try {
+      const res = await submitUpdateScores(id, credit, green, address ?? '', sign, isMultisig)
+      toast({
+        tone: 'success',
+        title: t('toastScoresTitle'),
+        message:
+          t('toastScoresMsg', { name, credit, green }) +
+          (res.approvalCount ? ` (${res.approvalCount} approval recorded)` : ''),
+        duration: 5000,
+      })
+    } catch (e) {
+      toast({
+        tone: 'error',
+        title: 'Transaction failed',
+        message: e instanceof Error ? e.message : 'Failed to update scores',
+        duration: 5000,
+      })
+    }
   }
 
-  const fundProject = (id: number, amount: number) => {
-    const safe = Math.min(amount, liquid)
+  const fundProject = async (id: number, amount: number) => {
     setRegistry((rows) =>
       rows.map((r) =>
-        r.id === id ? { ...r, funded: formatFunded(parseFundedNum(r.funded) + safe) } : r,
+        r.id === id ? { ...r, funded: formatFunded(parseFundedNum(r.funded) + amount) } : r,
       ),
     )
-    setLiquid((l) => l - safe)
-    setDeployed((d) => d + safe)
+    setLiquid((l) => l - amount)
+    setDeployed((d) => d + amount)
     const name = registry.find((r) => r.id === id)?.name ?? 'project'
-    toast({
-      tone: 'solar',
-      title: t('toastFundTitle'),
-      message: t('toastFundMsg', { name, amount: sharedFormatMoney(safe) }),
-      duration: 5000,
-    })
+    try {
+      const res = await submitFundProject(id, amount, address ?? '', sign, isMultisig)
+      toast({
+        tone: 'solar',
+        title: t('toastFundTitle'),
+        message:
+          t('toastFundMsg', { name, amount: sharedFormatMoney(amount) }) +
+          (res.approvalCount ? ` (${res.approvalCount} approval recorded)` : ''),
+        duration: 5000,
+      })
+    } catch (e) {
+      toast({
+        tone: 'error',
+        title: 'Transaction failed',
+        message: e instanceof Error ? e.message : 'Failed to fund project',
+        duration: 5000,
+      })
+    }
   }
 
-  const setCreatorStatus = (
-    address: string,
+  const setCreatorStatus = async (
+    targetAddress: string,
     status: Creator['status'],
     rejectionReason?: string,
   ) => {
     // Revoking a creator is consequential: confirm first, then offer undo.
     if (status === 'pending' || status === 'rejected') {
-      const c = whitelist.find((x) => x.address === address)
+      const c = whitelist.find((x) => x.address === targetAddress)
       if (!window.confirm(`${t('actionRevoke')} ${c?.name ?? 'Creator'}?`)) return
     }
     setWhitelist((list) =>
       list.map((c) =>
-        c.address === address
+        c.address === targetAddress
           ? { ...c, status, rejectionReason: status === 'rejected' ? rejectionReason : undefined }
           : c,
       ),
     )
-    const c = whitelist.find((x) => x.address === address)
+    const c = whitelist.find((x) => x.address === targetAddress)
     const toneMap = {
       approved: 'success' as const,
       rejected: 'error' as const,
@@ -116,32 +204,50 @@ export function AdminConsole() {
       rejected: t('toastRevokedMsg', { name: c?.name ?? 'Creator' }),
       pending: t('toastRevokedMsg', { name: c?.name ?? 'Creator' }),
     }
-    toast({
-      tone: toneMap[status],
-      title: titleMap[status],
-      message: messageMap[status],
-      action:
-        status !== 'approved' ? (
-          <button
-            type="button"
-            onClick={() => setCreatorStatus(address, 'approved')}
-            style={{
-              fontFamily: 'var(--font-body)',
-              fontWeight: 600,
-              fontSize: 'var(--type-data)',
-              color: 'var(--solar)',
-              background: 'none',
-              border: 'none',
-              padding: 0,
-              cursor: 'pointer',
-              textDecoration: 'underline',
-            }}
-          >
-            {t('actionUndo')}
-          </button>
-        ) : undefined,
-      duration: 5000,
-    })
+    try {
+      const res = await submitSetWhitelist(
+        targetAddress,
+        status === 'approved',
+        address ?? '',
+        sign,
+        isMultisig,
+      )
+      toast({
+        tone: toneMap[status],
+        title: titleMap[status],
+        message:
+          messageMap[status] +
+          (res.approvalCount ? ` (${res.approvalCount} approval recorded)` : ''),
+        action:
+          status !== 'approved' ? (
+            <button
+              type="button"
+              onClick={() => setCreatorStatus(targetAddress, 'approved')}
+              style={{
+                fontFamily: 'var(--font-body)',
+                fontWeight: 600,
+                fontSize: 'var(--type-data)',
+                color: 'var(--solar)',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              {t('actionUndo')}
+            </button>
+          ) : undefined,
+        duration: 5000,
+      })
+    } catch (e) {
+      toast({
+        tone: 'error',
+        title: 'Transaction failed',
+        message: e instanceof Error ? e.message : 'Failed to update whitelist',
+        duration: 5000,
+      })
+    }
   }
 
   const totalAssets = liquid + deployed
@@ -187,11 +293,43 @@ export function AdminConsole() {
 
       {/* Project registry table */}
       <Section title={t('sectionRegistry')} caption={t('sectionRegistryCaption')}>
+        {!canUpdateScores && (
+          <div
+            style={{
+              padding: '8px 12px',
+              marginBottom: 12,
+              background: 'var(--ink-06)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--type-caption)',
+              color: 'var(--ink-60)',
+            }}
+          >
+            Registry owner permissions required to update scores.
+          </div>
+        )}
         <RegistryTable rows={registry} onSave={updateScores} />
       </Section>
 
       {/* Oracle actions */}
       <Section title={t('sectionOracle')} caption={t('sectionOracleCaption')}>
+        {(!canFund || !canUpdateScores) && (
+          <div
+            style={{
+              padding: '8px 12px',
+              marginBottom: 12,
+              background: 'var(--ink-06)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--type-caption)',
+              color: 'var(--ink-60)',
+            }}
+          >
+            {!canFund && !canUpdateScores
+              ? 'Vault owner or registry owner permissions required for privileged actions.'
+              : !canFund
+                ? 'Vault owner permissions required to fund projects.'
+                : 'Registry owner permissions required to update scores.'}
+          </div>
+        )}
         <OracleForms
           projects={registry}
           liquid={liquid}
@@ -202,6 +340,20 @@ export function AdminConsole() {
 
       {/* Whitelist management */}
       <Section title={t('sectionWhitelist')} caption={t('sectionWhitelistCaption')}>
+        {!canManageWhitelist && (
+          <div
+            style={{
+              padding: '8px 12px',
+              marginBottom: 12,
+              background: 'var(--ink-06)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--type-caption)',
+              color: 'var(--ink-60)',
+            }}
+          >
+            Whitelister permissions required to manage the creator whitelist.
+          </div>
+        )}
         <div>
           {whitelist.map((c, i) => (
             <div
@@ -224,6 +376,7 @@ export function AdminConsole() {
                   <Button
                     size="sm"
                     variant="ghost"
+                    disabled={!canManageWhitelist}
                     onClick={() => setCreatorStatus(c.address, 'pending')}
                   >
                     {t('actionRevoke')}
@@ -232,6 +385,7 @@ export function AdminConsole() {
                   <Button
                     size="sm"
                     variant="ghost"
+                    disabled={!canManageWhitelist}
                     onClick={() => setCreatorStatus(c.address, 'approved')}
                   >
                     {t('actionApprove')}

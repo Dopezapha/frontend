@@ -1,15 +1,22 @@
 'use client'
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useTranslations } from 'next-intl'
-import { Button, useToast } from '../components'
+import { Button, TransactionsDrawer, useToast } from '../components'
 import { useLocaleSwitcher } from '../i18n/LocaleProvider'
-import { LOCALE_LABELS, type Locale } from '../i18n/config'
+import { LOCALE_LABELS, LOCALE_NAMES, type Locale } from '../i18n/config'
 import { useWallet, shortAddress } from '../wallet/WalletProvider'
+import { useTransactions } from '../wallet/TransactionsProvider'
 import { useTheme } from '../theme/ThemeProvider'
+import { NETWORK_PASSPHRASE, networkLabel, getExplorerAccountUrl } from '../config/network'
+import { useHorizonHealth } from '../hooks/useHorizonHealth'
+import { networkMismatchMessage } from '../wallet/networkGuard'
+
+/** "Testnet", "Standalone", … — shown as a persistent pill on non-mainnet builds (#611). */
+const NETWORK_NAME = networkLabel(NETWORK_PASSPHRASE)
 
 const Mark = dynamic(() => import('../brand/Mark').then((m) => m.Mark), {
   ssr: false,
@@ -17,8 +24,8 @@ const Mark = dynamic(() => import('../brand/Mark').then((m) => m.Mark), {
 
 /**
  * TopBar — persistent nav rendered by the root layout. Analemma mark + Explore /
- * How it works / Learn / Creator, network status dot, theme toggle, language
- * switcher, Connect (or the connected wallet pill). Active state derives from the
+ * How it works / Learn / Creator, network status dot, preferences menu (theme +
+ * language), Connect (or the connected wallet pill). Active state derives from the
  * route (and a scroll-spy for the landing anchors); connection from the wallet.
  */
 const NAV = [
@@ -33,58 +40,47 @@ export function TopBar() {
   const router = useRouter()
   const t = useTranslations('Nav')
   useLocaleSwitcher()
-  const { connected, address, connecting, isDemo } = useWallet()
-  const { theme, toggle } = useTheme()
+  const {
+    connected,
+    address,
+    connecting,
+    syncing,
+    restoring,
+    isDemo,
+    networkMismatch,
+    walletNetworkPassphrase,
+    checkWalletNetwork,
+  } = useWallet()
+  const { pendingCount, transactions } = useTransactions()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const closeDrawer = useCallback(() => setDrawerOpen(false), [])
 
-  const [networkOnline, setNetworkOnline] = useState(true)
+  const { isOnline: networkOnline } = useHorizonHealth()
 
   useEffect(() => {
     router.prefetch('/connect')
   }, [router])
 
   useEffect(() => {
-    let cancelled = false
-    let currentController: AbortController | undefined
+    // The route is an external navigation signal; close the transient menu
+    // after navigation so it cannot remain open over the next page.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMobileMenuOpen(false)
+  }, [pathname])
 
-    const check = async () => {
-      if (!navigator.onLine) {
-        if (!cancelled) setNetworkOnline(false)
-        return
-      }
-      const controller = new AbortController()
-      currentController = controller
-      const timeoutId = setTimeout(() => controller.abort(), 3000)
-      try {
-        const res = await fetch('https://horizon-testnet.stellar.org', {
-          signal: controller.signal,
-          cache: 'no-store',
-        })
-        if (!cancelled) setNetworkOnline(res.ok || res.status < 500)
-      } catch {
-        if (!cancelled) setNetworkOnline(false)
-      } finally {
-        clearTimeout(timeoutId)
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileMenuOpen(false)
+        mobileMenuButtonRef.current?.focus()
       }
     }
-
-    const handleOnline = () => { void check() }
-    const handleOffline = () => {
-      currentController?.abort()
-      if (!cancelled) setNetworkOnline(false)
-    }
-
-    window.addEventListener('online', handleOnline)
-    window.addEventListener('offline', handleOffline)
-    void check()
-    const interval = setInterval(() => { void check() }, 15000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-      currentController?.abort()
-    }
-  }, [])
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [mobileMenuOpen])
 
   // Theme state starts 'light' on server/first render (to avoid a hydration
   // mismatch), so the toggle icon can't be trusted until after mount — a
@@ -119,151 +115,267 @@ export function TopBar() {
     return () => observer.disconnect()
   }, [pathname])
 
-  const isDarkTheme = mounted && theme === 'dark'
-  const themeToggleLabel = isDarkTheme ? t('switchToLight') : t('switchToDark')
-
   return (
     <>
-    <header
-      style={{
-        position: 'sticky',
-        top: 0,
-        zIndex: 200,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 28,
-        padding: '0 32px',
-        height: 68,
-        background: 'color-mix(in srgb, var(--canvas) 86%, transparent)',
-        backdropFilter: 'saturate(140%) blur(12px)',
-        WebkitBackdropFilter: 'saturate(140%) blur(12px)',
-        borderBottom: '1px solid var(--ink-12)',
-      }}
-    >
-      <Link
-        href="/"
-        aria-label={t('brandHome')}
-        style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}
-      >
-        {mounted && pathname === '/' ? <Mark /> : null}
-        <span
-          style={{
-            fontFamily: 'var(--font-display)',
-            fontWeight: 700,
-            fontSize: 21,
-            letterSpacing: '-0.01em',
-            color: 'var(--ink)',
-          }}
-        >
-          heliobond
-        </span>
-      </Link>
+      <header className="hb-topbar">
+        <Link href="/" aria-label={t('brandHome')} className="hb-topbar__home">
+          {mounted && pathname === '/' ? <Mark /> : null}
+          <span
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontWeight: 700,
+              fontSize: 21,
+              letterSpacing: '-0.01em',
+              color: 'var(--ink)',
+            }}
+          >
+            heliobond
+          </span>
+        </Link>
 
-      <nav className="hb-topbar-nav" style={{ display: 'flex', gap: 4, marginInlineStart: 8 }}>
-        {NAV.map(({ href, key }) => {
-          const active = href.includes('#')
-            ? pathname === '/' && activeHash === href.slice(href.indexOf('#'))
-            : pathname === href
-          return (
-            <Link
-              key={key}
-              href={href}
-              aria-current={active ? 'page' : undefined}
+        <nav className="hb-topbar-nav hb-topbar__nav">
+          {NAV.map(({ href, key }) => {
+            const active = href.includes('#')
+              ? pathname === '/' && activeHash === href.slice(href.indexOf('#'))
+              : pathname === href
+            return (
+              <Link
+                key={key}
+                href={href}
+                aria-current={active ? 'page' : undefined}
+                style={{
+                  textDecoration: 'none',
+                  padding: '8px 14px',
+                  borderRadius: 'var(--radius-pill)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 14.5,
+                  fontWeight: 500,
+                  color: active ? 'var(--ink)' : 'var(--ink-60)',
+                }}
+              >
+                {t(key)}
+              </Link>
+            )
+          })}
+        </nav>
+
+        <div className="hb-topbar__actions">
+          <NetworkPill passphrase={NETWORK_PASSPHRASE} />
+
+          <span
+            role="status"
+            aria-label={networkOnline ? `Network: ${NETWORK_NAME} online` : 'Offline'}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 7,
+              fontFamily: 'var(--font-data)',
+              fontSize: 12,
+              color: networkOnline ? 'var(--ink-60)' : '#fff',
+              background: networkOnline ? 'transparent' : 'var(--ember)',
+              borderRadius: networkOnline ? 0 : 'var(--radius-pill)',
+              padding: networkOnline ? 0 : '4px 10px',
+            }}
+          >
+            <span
+              aria-hidden="true"
               style={{
-                textDecoration: 'none',
-                padding: '8px 14px',
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: networkOnline ? 'var(--growth)' : '#fff',
+                boxShadow: networkOnline ? '0 0 0 3px var(--growth-12)' : 'none',
+              }}
+            />
+            {networkOnline ? null : 'Offline'}
+          </span>
+
+          <PreferencesDropdown />
+
+          {(connected || transactions.length > 0) && (
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Transaction activity history"
+              title="Transaction activity history"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 12px',
                 borderRadius: 'var(--radius-pill)',
-                fontFamily: 'var(--font-body)',
-                fontSize: 14.5,
-                fontWeight: 500,
-                color: active ? 'var(--ink)' : 'var(--ink-60)',
+                border:
+                  pendingCount > 0
+                    ? '1px solid rgba(59, 130, 246, 0.4)'
+                    : '1px solid var(--ink-12)',
+                background: pendingCount > 0 ? 'rgba(59, 130, 246, 0.1)' : 'var(--surface)',
+                color: pendingCount > 0 ? '#3b82f6' : 'var(--ink)',
+                fontFamily: 'var(--font-data)',
+                fontSize: 'var(--type-caption)',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all var(--dur-press) var(--ease-out)',
               }}
             >
-              {t(key)}
-            </Link>
-          )
-        })}
-      </nav>
+              {pendingCount > 0 && (
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: '#3b82f6',
+                    animation: 'hb-pulse 1.4s ease-in-out infinite',
+                  }}
+                />
+              )}
+              {pendingCount > 0 ? `${pendingCount} Pending` : 'Activity'}
+            </button>
+          )}
 
-      <div style={{ marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
-        <span
-          role="status"
-          aria-label={networkOnline ? t('networkStatus') : t('offline')}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 7,
-            fontFamily: 'var(--font-data)',
-            fontSize: 12,
-            color: networkOnline ? 'var(--ink-60)' : '#fff',
-            background: networkOnline ? 'transparent' : 'var(--ember)',
-            borderRadius: networkOnline ? 0 : 'var(--radius-pill)',
-            padding: networkOnline ? 0 : '4px 10px',
-          }}
-        >
-          <span
-            aria-hidden="true"
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: networkOnline ? 'var(--growth)' : '#fff',
-              boxShadow: networkOnline ? '0 0 0 3px var(--growth-12)' : 'none',
-            }}
-          />
-          {networkOnline ? t('testnet') : t('offline')}
-        </span>
+          {connected && address ? (
+            <WalletMenu
+              address={address}
+              isDemo={isDemo}
+              syncing={syncing || restoring || connecting}
+            />
+          ) : (
+            <Button
+              variant="primary"
+              size="md"
+              loading={(connecting || syncing || restoring) && networkOnline}
+              onClick={() => router.push('/connect')}
+            >
+              {t('connect')}
+            </Button>
+          )}
+        </div>
 
         <button
+          ref={mobileMenuButtonRef}
           type="button"
-          onClick={toggle}
-          aria-label={themeToggleLabel}
-          aria-pressed={mounted ? isDarkTheme : undefined}
-          title={themeToggleLabel}
-          style={iconBtnStyle}
+          className="hb-mobile-menu-button"
+          aria-label="Open site menu"
+          aria-expanded={mobileMenuOpen}
+          aria-controls="mobile-site-menu"
+          onClick={() => setMobileMenuOpen((open) => !open)}
         >
-          {mounted ? isDarkTheme ? <SunIcon /> : <MoonIcon /> : null}
+          Menu
         </button>
 
-        <LocaleDropdown />
-
-        {connected && address ? (
-          <WalletMenu address={address} isDemo={isDemo} />
-        ) : (
-          <Button
-            variant="primary"
-            size="md"
-            loading={connecting && networkOnline}
-            onClick={() => router.push('/connect')}
-          >
-            {t('connect')}
-          </Button>
+        {mobileMenuOpen && (
+          <div id="mobile-site-menu" className="hb-mobile-menu-panel" role="menu">
+            {NAV.map(({ href, key }) => (
+              <Link
+                key={key}
+                href={href}
+                role="menuitem"
+                onClick={() => setMobileMenuOpen(false)}
+                className="hb-mobile-menu-link"
+              >
+                {t(key)}
+              </Link>
+            ))}
+            <PreferencesDropdown />
+          </div>
         )}
-      </div>
-    </header>
-    {!networkOnline && (
-      <div
-        role="alert"
-        style={{
-          position: 'sticky',
-          top: 68,
-          zIndex: 199,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 8,
-          padding: '8px 16px',
-          background: 'var(--ember)',
-          color: '#fff',
-          fontFamily: 'var(--font-body)',
-          fontSize: 13,
-          fontWeight: 500,
-        }}
-      >
-        {t('offlineCached')}
-      </div>
-    )}
+        <TransactionsDrawer open={drawerOpen} onClose={closeDrawer} />
+      </header>
+      {!networkOnline && (
+        <div
+          role="alert"
+          style={{
+            position: 'sticky',
+            top: 68,
+            zIndex: 199,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+            padding: '8px 16px',
+            background: 'var(--ember)',
+            color: '#fff',
+            fontFamily: 'var(--font-body)',
+            fontSize: 13,
+            fontWeight: 500,
+          }}
+        >
+          {t('offlineCached')}
+        </div>
+      )}
+      {networkMismatch && walletNetworkPassphrase && (
+        <div
+          role="alert"
+          data-testid="network-mismatch"
+          style={{
+            position: 'sticky',
+            top: 68,
+            zIndex: 199,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexWrap: 'wrap',
+            gap: 12,
+            padding: '8px 16px',
+            background: 'var(--ember)',
+            color: '#fff',
+            fontFamily: 'var(--font-body)',
+            fontSize: 13,
+            fontWeight: 500,
+          }}
+        >
+          <span>
+            {networkMismatchMessage(walletNetworkPassphrase, NETWORK_PASSPHRASE)}{' '}
+            {t('signingBlocked')}
+          </span>
+          <button
+            type="button"
+            onClick={() => void checkWalletNetwork()}
+            style={{
+              fontFamily: 'var(--font-body)',
+              fontSize: 13,
+              fontWeight: 600,
+              padding: '4px 12px',
+              borderRadius: 'var(--radius-pill)',
+              border: '1px solid #fff',
+              background: 'transparent',
+              color: '#fff',
+              cursor: 'pointer',
+            }}
+          >
+            {t('checkAgain')}
+          </button>
+        </div>
+      )}
     </>
+  )
+}
+
+/**
+ * Persistent network pill ("TESTNET", "STANDALONE", …) on every non-mainnet
+ * build, so nobody mistakes test balances for real ones (#611).
+ */
+export function NetworkPill({ passphrase }: { passphrase: string }) {
+  const name = networkLabel(passphrase)
+  if (name === 'Mainnet') return null
+  return (
+    <span
+      data-testid="network-pill"
+      title={`This build runs on the Stellar ${name} — balances have no real value.`}
+      style={{
+        fontFamily: 'var(--font-data)',
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: '0.08em',
+        color: 'var(--ink)',
+        background: 'var(--solar-12)',
+        border: '1px solid var(--solar)',
+        borderRadius: 'var(--radius-pill)',
+        padding: '3px 10px',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {name.toUpperCase()}
+    </span>
   )
 }
 
@@ -280,12 +392,21 @@ const iconBtnStyle = {
   color: 'var(--ink-60)',
 } as const
 
-function LocaleDropdown() {
+function PreferencesDropdown() {
   const t = useTranslations('Nav')
   const { locale, switchLocale } = useLocaleSwitcher()
+  const { theme, toggle } = useTheme()
+  // Theme state starts 'light' on server/first render (to avoid a hydration
+  // mismatch), so the theme label can't be trusted until after mount.
+  const [mounted, setMounted] = useState(false)
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => setMounted(true), [])
+  const isDarkTheme = mounted && theme === 'dark'
+  const themeToggleLabel = isDarkTheme ? t('switchToLight') : t('switchToDark')
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
 
   useEffect(() => {
     if (!open) return
@@ -298,19 +419,40 @@ function LocaleDropdown() {
 
   useEffect(() => {
     if (open) {
-      setTimeout(() => {
-        const items = ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
-        items?.[0]?.focus()
-      }, 0)
+      const timer = setTimeout(() => itemRefs.current[0]?.focus(), 0)
+      return () => clearTimeout(timer)
     }
   }, [open])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
+    const items = itemRefs.current.filter((el): el is HTMLButtonElement => el !== null)
+    if (!items.length) return
+    const focused = document.activeElement
+    const idx = items.indexOf(focused as HTMLButtonElement)
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      items[(idx + 1) % items.length].focus()
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      items[(idx - 1 + items.length) % items.length].focus()
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      items[0].focus()
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      items[items.length - 1].focus()
+    } else if (e.key === 'Escape') {
       setOpen(false)
       triggerRef.current?.focus()
+    } else if (e.key === 'Tab') {
+      setOpen(false)
     }
   }
+
+  // Reset item refs array before each render
+  // eslint-disable-next-line react-hooks/refs
+  itemRefs.current = []
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
@@ -320,19 +462,11 @@ function LocaleDropdown() {
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={t('language')}
-        style={{
-          ...iconBtnStyle,
-          width: 'auto',
-          gap: 5,
-          padding: '0 6px',
-          fontFamily: 'var(--font-body)',
-          fontSize: 14,
-          color: 'var(--ink-60)',
-        }}
+        aria-label={t('preferences')}
+        title={t('preferences')}
+        style={iconBtnStyle}
       >
-        {LOCALE_LABELS[locale]}
-        <ChevronDown />
+        <SettingsIcon />
       </button>
 
       {open && (
@@ -344,7 +478,7 @@ function LocaleDropdown() {
             position: 'absolute',
             top: 48,
             insetInlineEnd: 0,
-            minWidth: 120,
+            minWidth: 200,
             background: 'var(--surface)',
             border: '1px solid var(--ink-12)',
             borderRadius: 'var(--radius-card)',
@@ -353,10 +487,62 @@ function LocaleDropdown() {
             zIndex: 400,
           }}
         >
+          <button
+            ref={(el) => {
+              itemRefs.current.push(el)
+            }}
+            role="menuitemcheckbox"
+            aria-checked={isDarkTheme}
+            tabIndex={-1}
+            type="button"
+            onClick={toggle}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+              width: '100%',
+              textAlign: 'start',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '9px 10px',
+              borderRadius: 'var(--radius-input)',
+              fontFamily: 'var(--font-body)',
+              fontSize: 14,
+              fontWeight: 500,
+              color: 'var(--ink-60)',
+              background: 'transparent',
+            }}
+          >
+            {themeToggleLabel}
+            {mounted ? isDarkTheme ? <SunIcon /> : <MoonIcon /> : null}
+          </button>
+          <div
+            role="separator"
+            style={{ height: 1, background: 'var(--ink-12)', margin: '6px 0' }}
+          />
+          <div
+            role="presentation"
+            style={{
+              padding: '4px 10px',
+              fontFamily: 'var(--font-data)',
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color: 'var(--ink-40)',
+            }}
+          >
+            {t('language')}
+          </div>
           {(Object.keys(LOCALE_LABELS) as Locale[]).map((code) => (
             <button
               key={code}
-              role="menuitem"
+              ref={(el) => {
+                itemRefs.current.push(el)
+              }}
+              role="menuitemradio"
+              aria-checked={code === locale}
               tabIndex={-1}
               type="button"
               onClick={() => {
@@ -378,7 +564,7 @@ function LocaleDropdown() {
                 background: 'transparent',
               }}
             >
-              {LOCALE_LABELS[code]}
+              <span lang={code}>{LOCALE_NAMES[code]}</span>
             </button>
           ))}
         </div>
@@ -387,12 +573,12 @@ function LocaleDropdown() {
   )
 }
 
-function ChevronDown() {
+function SettingsIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
-      width="14"
-      height="14"
+      width="18"
+      height="18"
       fill="none"
       stroke="currentColor"
       strokeWidth="1.5"
@@ -400,7 +586,8 @@ function ChevronDown() {
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <path d="m6 9 6 6 6-6" />
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
     </svg>
   )
 }
@@ -441,7 +628,15 @@ function SunIcon() {
 }
 
 /** The connected wallet pill + its account menu (incl. Disconnect / sign out). */
-function WalletMenu({ address, isDemo }: { address: string; isDemo: boolean }) {
+function WalletMenu({
+  address,
+  isDemo,
+  syncing = false,
+}: {
+  address: string
+  isDemo: boolean
+  syncing?: boolean
+}) {
   const t = useTranslations('Nav')
   const { toast } = useToast()
   const router = useRouter()
@@ -454,6 +649,14 @@ function WalletMenu({ address, isDemo }: { address: string; isDemo: boolean }) {
 
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
+
+  // Closing the menu resets the confirm step. Adjusting during render is React's
+  // sanctioned way to reset state for a changed prop (#598).
+  const [wasMenuOpen, setWasMenuOpen] = useState(false)
+  if (wasMenuOpen !== open) {
+    setWasMenuOpen(open)
+    if (!open) setConfirming(false)
+  }
   const [copied, setCopied] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -485,19 +688,18 @@ function WalletMenu({ address, isDemo }: { address: string; isDemo: boolean }) {
   }, [open])
 
   useEffect(() => {
-    if (!open) {
-      setConfirming(false)
-      if (cancelTimerRef.current) {
-        clearTimeout(cancelTimerRef.current)
-        cancelTimerRef.current = null
+    if (open) {
+      const onDown = (e: MouseEvent) => {
+        if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
       }
-      return
+      document.addEventListener('mousedown', onDown)
+      return () => document.removeEventListener('mousedown', onDown)
     }
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    // Closing cancels a pending confirm-reset so it cannot fire on a later open.
+    if (cancelTimerRef.current) {
+      clearTimeout(cancelTimerRef.current)
+      cancelTimerRef.current = null
     }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
   const copy = async () => {
@@ -613,7 +815,27 @@ function WalletMenu({ address, isDemo }: { address: string; isDemo: boolean }) {
         <span style={{ fontFamily: 'var(--font-data)', fontSize: 13, color: 'var(--ink)' }}>
           {shortAddress(address)}
         </span>
-        <span style={{ width: 28, height: 28, borderRadius: '50%', background: 'var(--solar)' }} />
+        {syncing ? (
+          <span
+            role="status"
+            aria-label="Syncing with Stellar"
+            title="Syncing with Stellar…"
+            style={{
+              width: 16,
+              height: 16,
+              border: '2px solid var(--ink-20, rgba(0,0,0,0.2))',
+              borderTopColor: 'var(--solar)',
+              borderRadius: '50%',
+              animation: 'hb-spin 0.8s linear infinite',
+              display: 'inline-block',
+              marginInline: 6,
+            }}
+          />
+        ) : (
+          <span
+            style={{ width: 28, height: 28, borderRadius: '50%', background: 'var(--solar)' }}
+          />
+        )}
       </button>
 
       {open && (
@@ -643,7 +865,7 @@ function WalletMenu({ address, isDemo }: { address: string; isDemo: boolean }) {
             <span
               style={{ fontFamily: 'var(--font-body)', fontSize: 11.5, color: 'var(--ink-40)' }}
             >
-              {isDemo ? t('demoSession') : t('testnet')}
+              {isDemo ? t('demoSession') : NETWORK_NAME}
             </span>
           </div>
           <div style={{ height: 1, background: 'var(--ink-12)', margin: '4px 0' }} />
@@ -682,7 +904,7 @@ function WalletMenu({ address, isDemo }: { address: string; isDemo: boolean }) {
               ref={(el) => {
                 itemRefs.current.push(el)
               }}
-              href={`https://stellar.expert/explorer/testnet/account/${address}`}
+              href={getExplorerAccountUrl(address)}
             >
               {t('viewOnExplorer')}
             </MenuLink>

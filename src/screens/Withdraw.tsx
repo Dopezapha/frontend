@@ -3,19 +3,21 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button, AmountInput, LiquidityMeter, AddressChip, useToast } from '../components'
-import { submitWithdraw } from '../wallet/vault'
+import { calculateWithdrawTierLimit, fetchUtilizationBps, submitWithdraw } from '../wallet/vault'
+import { reportTransactionFailure } from '../lib/errorReporting'
+import { parseContractError, translateContractError } from '../lib/contractErrors'
 import { useWallet } from '../wallet/WalletProvider'
+import { TransactionPendingError } from '../wallet/transactions'
+import { useTransactionFee } from '../wallet/useTransactionFee'
 import { formatDecimal, parseAmount } from '../lib/format'
+import { addPendingClaim } from '../wallet/pendingClaims'
+import { getExplorerTxUrl } from '../config/network'
+import { useVault } from '../wallet/useVault'
+import { useVaultLimits } from '../wallet/useVaultLimits'
+import { usePortfolio } from '../hooks/usePortfolio'
 
-const LIQUID_SHARE = 236
-const TOTAL_LIQUID = 482
-const TOTAL_LIQUID_BALANCE = '482.00'
-const QUICK_WITHDRAW_AMOUNT_SMALL = 2000
-const QUICK_WITHDRAW_AMOUNT_MEDIUM = 5000
-const QUICK_WITHDRAW_AMOUNT_LARGE = 10000
-const QUICK_WITHDRAW_AMOUNTS = [QUICK_WITHDRAW_AMOUNT_SMALL, QUICK_WITHDRAW_AMOUNT_MEDIUM, QUICK_WITHDRAW_AMOUNT_LARGE]
-const MIN_WITHDRAWAL_AMOUNT = 1
 const DISPLAY_DECIMALS = 2
+const DEFAULT_SLIPPAGE_TOLERANCE = 0.005 // 0.5%
 
 /**
  * Withdraw — designed with the most care of all. Capped at the live liquid
@@ -31,16 +33,86 @@ type WithdrawStep = 'amount' | 'pending' | 'success'
 
 export function Withdraw({ onDone, onBack }: WithdrawProps) {
   const t = useTranslations('Withdraw')
+  const tErr = useTranslations('ContractErrors')
   const { toast } = useToast()
-  const { address, sign } = useWallet()
-  const liquid = LIQUID_SHARE // your liquid share, $
+  const { address, sign, isDemo, connected } = useWallet()
+  const { sharePrice, totalAssets } = useVault()
+  const {
+    minWithdrawShares,
+    paused,
+    maxTx,
+    lockExpiresAt,
+    utilizationBps,
+    loading: limitsLoading,
+    error: limitsError,
+  } = useVaultLimits()
+  const {
+    portfolio,
+    you,
+    vaultLiquidity,
+    loading: portfolioLoading,
+    error: portfolioError,
+  } = usePortfolio()
+
+  // Demo fixtures are useful elsewhere in the app, but must never be treated
+  // as a connected wallet's withdrawable balance while Soroban reads settle.
+  const livePositionRequired = connected && !isDemo
+  const positionReady =
+    !livePositionRequired || Boolean(portfolio && !portfolioLoading && !portfolioError)
+  const userPosition = livePositionRequired
+    ? positionReady
+      ? (portfolio?.usdcValue ?? 0)
+      : 0
+    : you.value
+  const vaultLiquid =
+    vaultLiquidity?.liquid ?? (totalAssets > 0 ? totalAssets * (1 - utilizationBps / 10000) : 0)
+  const vaultTotal = vaultLiquidity?.total || totalAssets
+  const tierLimit = calculateWithdrawTierLimit(vaultLiquid, utilizationBps)
+  const immediateCap = Math.min(vaultLiquid, tierLimit)
+  const userImmediateCap = Math.min(userPosition, immediateCap)
+  const maxWithdrawable = Math.min(userPosition, maxTx, tierLimit)
+
+  const chips =
+    userPosition > 0 && maxWithdrawable >= minWithdrawShares * sharePrice
+      ? [0.25, 0.5, 1.0]
+          .map((pct) => Number((userPosition * pct).toFixed(DISPLAY_DECIMALS)))
+          .map((amt) => Math.min(amt, maxWithdrawable))
+          .filter(
+            (amt, idx, arr) => amt >= minWithdrawShares * sharePrice && arr.indexOf(amt) === idx,
+          )
+      : []
+
   const [step, setStep] = useState<WithdrawStep>('amount')
   const [amount, setAmount] = useState('')
   const [txHash, setTxHash] = useState<string | null>(null)
   const [txError, setTxError] = useState<string | null>(null)
+  const [isQueued, setIsQueued] = useState(false)
+  const [estimatedAmount, setEstimatedAmount] = useState<number | null>(null)
+  const [slippageTolerance, setSlippageTolerance] = useState(DEFAULT_SLIPPAGE_TOLERANCE)
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const minWithdrawUsdc = minWithdrawShares * sharePrice
+  const isLocked = lockExpiresAt > now
+  const lockRemaining = lockExpiresAt - now
+  const hours = Math.floor(lockRemaining / 3600)
+  const minutes = Math.floor((lockRemaining % 3600) / 60)
+  const lockText = `Withdrawals unlock in ${hours} h ${minutes} m`
 
   const mountedRef = useRef(true)
   const abortControllerRef = useRef<AbortController | null>(null)
+
+  const n = parseAmount(amount)
+
+  const estimatedFee = useTransactionFee('withdraw', n, address, slippageTolerance)
+  const feeLabel =
+    estimatedFee === null
+      ? 'Estimate unavailable'
+      : `${estimatedFee.toFixed(7)} XLM (estimated maximum)`
 
   useEffect(() => {
     mountedRef.current = true
@@ -61,19 +133,18 @@ export function Withdraw({ onDone, onBack }: WithdrawProps) {
       setStep(newStep)
     }
   }
+
   // Consolidate amount parsing with parseAmount helper (#417).
-  const n = parseAmount(amount)
 
   const renderStep = (currentStep: WithdrawStep) => {
-    const txExplorerUrl = txHash
-      ? `https://stellar.expert/explorer/testnet/tx/${txHash}`
-      : undefined
+    const txExplorerUrl = txHash ? getExplorerTxUrl(txHash) : undefined
 
     switch (currentStep) {
       case 'amount':
         return (
           <div style={panel}>
             <h1 style={hw}>{t('h1')}</h1>
+            <p>Network fee: {feeLabel}</p>
             {txError && (
               <div
                 role="alert"
@@ -92,7 +163,7 @@ export function Withdraw({ onDone, onBack }: WithdrawProps) {
               </div>
             )}
             <div style={{ marginBottom: 18 }}>
-              <LiquidityMeter liquid={liquid} total={TOTAL_LIQUID} currency="$" />
+              <LiquidityMeter liquid={vaultLiquid} total={vaultTotal} currency="$" />
             </div>
             <AmountInput
               value={amount}
@@ -100,42 +171,237 @@ export function Withdraw({ onDone, onBack }: WithdrawProps) {
               label={t('amountLabel')}
               currency="USDC"
               balanceLabel={t('yourValue')}
-              balance={TOTAL_LIQUID_BALANCE}
-              chips={QUICK_WITHDRAW_AMOUNTS}
-              cap={liquid}
-              capMessage={t('capMessage', { cap: liquid })}
+              balance={positionReady ? formatDecimal(userPosition, DISPLAY_DECIMALS) : '—'}
+              chips={chips}
+              min={minWithdrawUsdc}
+              max={Math.min(userPosition, maxTx)}
+              cap={userImmediateCap > 0 ? userImmediateCap : undefined}
+              capMessage={t('capMessage', {
+                cap: formatDecimal(immediateCap, DISPLAY_DECIMALS),
+              })}
               maxChipLabel={t('maxChip')}
               capActionLabel={t('withdrawMaxAvailable')}
             />
+            {positionReady &&
+              !limitsLoading &&
+              n > vaultLiquid &&
+              n <= tierLimit &&
+              n <= userPosition &&
+              n <= maxTx && (
+                <div
+                  role="status"
+                  style={{
+                    marginTop: 14,
+                    padding: '10px 14px',
+                    borderRadius: 'var(--radius-input)',
+                    background: 'rgba(234, 179, 8, 0.1)',
+                    border: '1px solid rgba(234, 179, 8, 0.3)',
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 'var(--type-small)',
+                    color: 'var(--ink)',
+                  }}
+                >
+                  <strong>Warning:</strong> Requested amount exceeds immediately available liquid
+                  balance (${formatDecimal(vaultLiquid, DISPLAY_DECIMALS)}). Your withdrawal will be
+                  placed in the FIFO queue (WithdrawQueued) and will be claimable once vault
+                  liquidity is replenished.
+                </div>
+              )}
+            {positionReady && !limitsLoading && n > tierLimit && (
+              <div
+                role="alert"
+                style={{
+                  marginTop: 14,
+                  padding: '10px 14px',
+                  borderRadius: 'var(--radius-input)',
+                  background: 'rgba(179,54,27,0.07)',
+                  border: '1px solid rgba(179,54,27,0.18)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--type-small)',
+                  color: 'var(--ember)',
+                }}
+              >
+                Amount exceeds maximum graduated tier limit ($
+                {formatDecimal(tierLimit, DISPLAY_DECIMALS)}).
+              </div>
+            )}
+            {positionReady && !limitsLoading && n > maxTx && n <= tierLimit && (
+              <div
+                role="alert"
+                style={{
+                  marginTop: 14,
+                  padding: '10px 14px',
+                  borderRadius: 'var(--radius-input)',
+                  background: 'rgba(179,54,27,0.07)',
+                  border: '1px solid rgba(179,54,27,0.18)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--type-small)',
+                  color: 'var(--ember)',
+                }}
+              >
+                Amount exceeds maximum pool transaction limit (${maxTx.toFixed(2)}).
+              </div>
+            )}
+            {n > 0 && (
+              <div style={{ marginTop: 14, marginBottom: 14 }}>
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 'var(--type-small)',
+                    color: 'var(--ink-60)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Slippage tolerance</span>
+                  <select
+                    value={slippageTolerance}
+                    onChange={(e) => setSlippageTolerance(Number(e.target.value))}
+                    style={{
+                      fontFamily: 'var(--font-body)',
+                      fontSize: 'var(--type-small)',
+                      padding: '6px 10px',
+                      borderRadius: 'var(--radius-input)',
+                      border: '1px solid var(--ink-12)',
+                      background: 'var(--surface)',
+                      color: 'var(--ink)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <option value={0.001}>0.1%</option>
+                    <option value={0.005}>0.5% (default)</option>
+                    <option value={0.01}>1%</option>
+                    <option value={0.02}>2%</option>
+                  </select>
+                  <span style={{ color: 'var(--ink-40)', fontSize: 'var(--type-caption)' }}>
+                    Min return: {formatDecimal(n * (1 - slippageTolerance), DISPLAY_DECIMALS)} USDC
+                  </span>
+                </label>
+              </div>
+            )}
             <Button
               variant="primary"
               size="lg"
               style={{ width: '100%', marginTop: 20, background: 'var(--primary)' }}
-              disabled={n < MIN_WITHDRAWAL_AMOUNT || n > liquid}
-              reason={n > liquid ? t('reasonExceeds') : n < MIN_WITHDRAWAL_AMOUNT ? t('reasonMin') : undefined}
+              disabled={
+                !positionReady ||
+                limitsLoading ||
+                Boolean(limitsError) ||
+                n < minWithdrawUsdc ||
+                n > userPosition ||
+                n > tierLimit ||
+                n > maxTx ||
+                paused ||
+                isLocked
+              }
+              reason={
+                !positionReady
+                  ? portfolioError
+                    ? 'Could not verify your wallet position'
+                    : 'Loading your wallet position'
+                  : limitsLoading
+                    ? 'Loading vault limits'
+                    : limitsError
+                      ? 'Could not verify vault limits'
+                      : paused
+                        ? 'Vault paused'
+                        : isLocked
+                          ? lockText
+                          : n > userPosition
+                            ? 'Amount exceeds your position'
+                            : n > tierLimit
+                              ? 'Amount exceeds graduated tier limit'
+                              : n > maxTx
+                                ? 'Amount exceeds pool transaction limit'
+                                : n < minWithdrawUsdc
+                                  ? t('reasonMin', {
+                                      min: formatDecimal(minWithdrawUsdc, DISPLAY_DECIMALS),
+                                    })
+                                  : undefined
+              }
               onClick={async () => {
                 changeStep('pending')
                 setTxError(null)
                 const controller = new AbortController()
                 abortControllerRef.current = controller
                 try {
-                  const hash = await submitWithdraw(n, address ?? '', sign, controller.signal)
+                  const result = await submitWithdraw(
+                    n,
+                    address ?? '',
+                    sign,
+                    controller.signal,
+                    slippageTolerance,
+                  )
                   if (mountedRef.current) {
+                    const hash = typeof result === 'string' ? result : result.hash
+                    const queued = typeof result === 'object' ? Boolean(result.queued) : false
+                    const est =
+                      typeof result === 'object' && result.estimatedAmount !== undefined
+                        ? result.estimatedAmount
+                        : undefined
                     setTxHash(hash)
+                    setIsQueued(queued)
+                    setEstimatedAmount(est ?? null)
                     changeStep('success')
-                    toast({
-                      tone: 'success',
-                      title: 'Withdrawal settled',
-                      message: `${formatDecimal(n, DISPLAY_DECIMALS)} USDC is on its way to your wallet.`,
-                    })
+
+                    if (queued) {
+                      addPendingClaim({
+                        id: hash,
+                        hash,
+                        ...(est === undefined ? {} : { amount: est }),
+                        timestamp: Date.now(),
+                        address: address ?? undefined,
+                      })
+                      toast({
+                        tone: 'solar',
+                        title: 'Withdrawal queued',
+                        message:
+                          est === undefined
+                            ? 'Withdrawal queued; owed amount is unavailable from this confirmation.'
+                            : `Owed amount ${formatDecimal(est, DISPLAY_DECIMALS)} USDC queued for payout.`,
+                      })
+                    } else {
+                      toast({
+                        tone: 'success',
+                        title: 'Withdrawal settled',
+                        message: `${formatDecimal(est ?? n, DISPLAY_DECIMALS)} USDC is on its way to your wallet.`,
+                      })
+                    }
                   }
                 } catch (e) {
                   if (mountedRef.current) {
                     if (e instanceof Error && e.message === 'Aborted') {
                       return
                     }
+                    const isTimeout = e instanceof TransactionPendingError
+                    if (isTimeout) {
+                      toast({
+                        tone: 'solar',
+                        title: "Still pending — we'll keep checking",
+                        message:
+                          'Withdrawal submitted but waiting for on-chain confirmation. Background tracking is active.',
+                      })
+                      changeStep('amount')
+                      return
+                    }
+                    // Contract failures get a translated, actionable message (#610);
+                    // liquidity errors also show current pool utilization when readable.
+                    reportTransactionFailure(e, 'withdraw')
+                    const contractError = parseContractError(e)
+                    let utilization: number | undefined
+                    if (
+                      contractError?.name === 'WithdrawalExceedsLimit' ||
+                      contractError?.name === 'InsufficientLiquid'
+                    ) {
+                      const bps = await fetchUtilizationBps(address ?? '').catch(() => 0)
+                      if (bps > 0) utilization = bps / 100
+                    }
+                    if (!mountedRef.current) return
                     setTxError(
-                      e instanceof Error ? e.message : 'Transaction failed — please try again.',
+                      translateContractError(e, tErr, { utilization }) ??
+                        (e instanceof Error ? e.message : 'Transaction failed — please try again.'),
                     )
                     changeStep('amount')
                   }
@@ -146,7 +412,21 @@ export function Withdraw({ onDone, onBack }: WithdrawProps) {
                 }
               }}
             >
-              {n >= MIN_WITHDRAWAL_AMOUNT && n <= liquid ? t('withdrawCta', { amount: n }) : t('withdrawCtaEmpty')}
+              {n >= minWithdrawUsdc &&
+              n <= vaultLiquid &&
+              n <= tierLimit &&
+              n <= userPosition &&
+              !paused &&
+              !isLocked
+                ? t('withdrawCta', { amount: n })
+                : n > vaultLiquid &&
+                    n <= tierLimit &&
+                    n <= userPosition &&
+                    n <= maxTx &&
+                    !paused &&
+                    !isLocked
+                  ? `Enqueue withdrawal for $${formatDecimal(n, DISPLAY_DECIMALS)}`
+                  : t('withdrawCtaEmpty')}
             </Button>
             <button
               onClick={onBack}
@@ -221,28 +501,66 @@ export function Withdraw({ onDone, onBack }: WithdrawProps) {
                 whiteSpace: 'nowrap',
               }}
             >
-              {t('successH1')}
+              {isQueued ? 'Withdrawal queued' : t('successH1')}
             </div>
-            <h1 style={{ ...hw, textAlign: 'center' }}>{t('successH1')}</h1>
-            <p
-              style={{
-                fontFamily: 'var(--font-body)',
-                fontSize: 'var(--type-data)',
-                lineHeight: 1.55,
-                color: 'var(--ink-60)',
-                textAlign: 'center',
-                margin: '0 0 22px',
-              }}
-            >
-              {t.rich('successBody', {
-                amount: formatDecimal(n, DISPLAY_DECIMALS),
-                num: (c: ReactNode) => (
-                  <b className="hb-data" style={{ color: 'var(--ink)' }}>
-                    {c}
-                  </b>
-                ),
-              })}
-            </p>
+            <h1 style={{ ...hw, textAlign: 'center' }}>
+              {isQueued ? 'Withdrawal queued' : t('successH1')}
+            </h1>
+            {isQueued ? (
+              <div style={{ textAlign: 'center', marginBottom: 22 }}>
+                <div
+                  style={{
+                    display: 'inline-block',
+                    padding: '8px 16px',
+                    borderRadius: 'var(--radius-pill)',
+                    background: 'rgba(234, 179, 8, 0.15)',
+                    border: '1px solid rgba(234, 179, 8, 0.4)',
+                    color: 'var(--ink)',
+                    fontFamily: 'var(--font-data)',
+                    fontWeight: 600,
+                    fontSize: 'var(--type-small)',
+                    marginBottom: 14,
+                  }}
+                >
+                  Queued
+                  {estimatedAmount !== null &&
+                    ` — owed amount $${formatDecimal(estimatedAmount, DISPLAY_DECIMALS)} USDC`}
+                </div>
+                <p
+                  style={{
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 'var(--type-data)',
+                    lineHeight: 1.55,
+                    color: 'var(--ink-60)',
+                    margin: 0,
+                  }}
+                >
+                  Your withdrawal has been queued in the FIFO queue because immediate vault
+                  liquidity is limited. You can track and claim this withdrawal from your Portfolio
+                  once liquidity becomes available.
+                </p>
+              </div>
+            ) : (
+              <p
+                style={{
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--type-data)',
+                  lineHeight: 1.55,
+                  color: 'var(--ink-60)',
+                  textAlign: 'center',
+                  margin: '0 0 22px',
+                }}
+              >
+                {t.rich('successBody', {
+                  amount: formatDecimal(n, DISPLAY_DECIMALS),
+                  num: (c: ReactNode) => (
+                    <b className="hb-data" style={{ color: 'var(--ink)' }}>
+                      {c}
+                    </b>
+                  ),
+                })}
+              </p>
+            )}
             {txHash && (
               <div style={{ textAlign: 'center', marginBottom: 16 }}>
                 <AddressChip
@@ -252,7 +570,12 @@ export function Withdraw({ onDone, onBack }: WithdrawProps) {
                 />
               </div>
             )}
-            <Button variant="primary" size="lg" style={{ width: '100%', background: 'var(--primary)' }} onClick={onDone}>
+            <Button
+              variant="primary"
+              size="lg"
+              style={{ width: '100%', background: 'var(--primary)' }}
+              onClick={onDone}
+            >
               {t('backToPortfolio')}
             </Button>
           </div>

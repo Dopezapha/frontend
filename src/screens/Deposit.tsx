@@ -1,30 +1,44 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, type CSSProperties, type ReactNode } from 'react'
-import { useTranslations } from 'next-intl'
-import { Button, AmountInput, useToast } from '../components'
+import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
+import { useLocale, useTranslations } from 'next-intl'
+import { Button, AmountInput, MemoInput, useToast } from '../components'
 import { Helio } from '../brand/Helio'
 import { submitDeposit } from '../wallet/vault'
 import { useVault } from '../wallet/useVault'
+import { useVaultLimits } from '../wallet/useVaultLimits'
+import { useUsdcBalance } from '../wallet/useUsdcBalance'
+import { TransactionPendingError } from '../wallet/transactions'
+import { useTransactionFee } from '../wallet/useTransactionFee'
 import { scrollToFirstError } from '../lib/scrollToError'
 import { getFriendlyErrorMessage } from '../lib/errorMessages'
+import { validateMemoLength } from '../lib/stellarPayment'
+import { translateContractError } from '../lib/contractErrors'
+import { reportTransactionFailure } from '../lib/errorReporting'
+import { isNetworkMismatchError } from '../wallet/networkGuard'
 import { useWallet } from '../wallet/WalletProvider'
 import { selectPoolSummary } from '../state/selectors'
-import { roundToCents, formatDecimal, formatSharePrice, parseAmount } from '../lib/format'
+import {
+  roundToCents,
+  formatDecimal,
+  formatSharePrice,
+  parseAmount,
+  formatDateTime,
+  formatTime,
+} from '../lib/format'
 import { projectedReturn } from '../lib/bondUtils'
 import { useDepositGuard } from '../hooks/useDepositGuard'
 import { RecurringInvestmentOptions } from '../components/RecurringInvestmentOptions'
 
-/**
- * Deposit — the flow that must be perfect. One column, one decision per step:
- * amount (live preview from the vault) -> review in plain words -> pending (hash
- * from second zero) -> success (impact, not hype). Errors name cause + fix.
- */
+const DEFAULT_DEPOSIT_USDC = '100'
+const RATE_STALE_AFTER_SECONDS = 30
+const DEFAULT_SLIPPAGE_TOLERANCE = 0.005 // 0.5%
+
+type DepositStep = 'amount' | 'review' | 'pending' | 'success'
+
 export interface DepositProps {
   onDone: () => void
 }
-
-type DepositStep = 'amount' | 'review' | 'pending' | 'success'
 
 const num = (chunks: ReactNode) => (
   <b className="hb-data" style={{ color: 'var(--ink)' }}>
@@ -32,15 +46,11 @@ const num = (chunks: ReactNode) => (
   </b>
 )
 const strong = (chunks: ReactNode) => <b style={{ color: 'var(--ink)' }}>{chunks}</b>
-const MIN_DEPOSIT_USDC = 1
-const USER_BALANCE_USDC = 240
-const DEFAULT_DEPOSIT_USDC = '100'
-const QUICK_DEPOSIT_AMOUNTS_USDC = [25, 50, 100]
-const DEPOSIT_FEE_USDC = 0.01
-const RATE_STALE_AFTER_SECONDS = 30
 
 export function Deposit({ onDone }: DepositProps) {
   const t = useTranslations('Deposit')
+  const tErr = useTranslations('ContractErrors')
+  const locale = useLocale()
   const { toast } = useToast()
   const { address, sign } = useWallet()
   // Flat selector — pool figures in one level, no nested-state drilling.
@@ -52,14 +62,36 @@ export function Deposit({ onDone }: DepositProps) {
     fetchedAt,
     refresh: refreshVault,
   } = useVault()
+  const { minDeposit, paused, maxTx } = useVaultLimits()
+  const { balance } = useUsdcBalance()
+  const quickDepositAmounts = Array.from(
+    new Set(
+      [
+        minDeposit,
+        balance !== null ? Math.min(250, balance) : 250,
+        balance !== null ? Math.min(500, balance) : 500,
+      ].filter((preset) => preset >= minDeposit),
+    ),
+  )
   const [step, setStep] = useState<DepositStep>('amount')
   const [amount, setAmount] = useState(DEFAULT_DEPOSIT_USDC)
+  const [memo, setMemo] = useState('')
   const [investmentId, setInvestmentId] = useState<string | null>(null)
   const [txError, setTxError] = useState<string | null>(null)
   const [recurring, setRecurring] = useState(false)
   const [recurrenceDay, setRecurrenceDay] = useState(1)
+  const [slippageTolerance, setSlippageTolerance] = useState(DEFAULT_SLIPPAGE_TOLERANCE)
   const priceFetchedAt = fetchedAt ?? new Date()
   const [now, setNow] = useState(() => Date.now())
+
+  const n = parseAmount(amount)
+  const isMemoValid = validateMemoLength(memo).valid
+
+  const estimatedFee = useTransactionFee('deposit', n, address, slippageTolerance)
+  const feeLabel =
+    estimatedFee === null
+      ? 'Estimate unavailable'
+      : `${estimatedFee.toFixed(7)} XLM (estimated maximum)`
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
@@ -102,25 +134,22 @@ export function Deposit({ onDone }: DepositProps) {
 
   const handleDone = () => {
     setAmount('')
+    setMemo('')
     setInvestmentId(null)
     setTxError(null)
     changeStep('amount')
     onDone()
   }
 
-  // Consolidate amount parsing with parseAmount helper (#417).
-  const n = parseAmount(amount)
-
-  const handleSubmitDeposit = useCallback(async () => {
+  async function handleSubmitDeposit() {
     changeStep('pending')
     setTxError(null)
     markPending(n, address ?? '')
     const controller = new AbortController()
     abortControllerRef.current = controller
     try {
-      // The tx hash is polled for confirmation inside submitDeposit; nothing
-      // on this surface reads it, so we don't bind it.
-      await submitDeposit(n, address ?? '', sign, controller.signal)
+      await submitDeposit(n, address ?? '', sign, controller.signal, slippageTolerance, memo)
+
       if (mountedRef.current) {
         clearPending()
         changeStep('success')
@@ -135,9 +164,27 @@ export function Deposit({ onDone }: DepositProps) {
         if (e instanceof Error && e.message === 'Aborted') {
           return
         }
+        const isTimeout = e instanceof TransactionPendingError
+        if (isTimeout) {
+          toast({
+            tone: 'solar',
+            title: "Still pending — we'll keep checking",
+            message:
+              'Transaction submitted but waiting for on-chain confirmation. Background tracking is active.',
+          })
+          changeStep('amount')
+          return
+        }
+
         clearPending()
-        const errorMessage =
-          e instanceof Error ? getFriendlyErrorMessage(e.message) : 'Transaction failed — please try again.'
+        reportTransactionFailure(e, 'deposit')
+        // A wallet/app network mismatch message is already user-facing (#611).
+        const errorMessage = isNetworkMismatchError(e)
+          ? e.message
+          : (translateContractError(e, tErr) ??
+            (e instanceof Error
+              ? getFriendlyErrorMessage(e.message)
+              : 'Transaction failed — please try again.'))
         changeStep('amount')
         toast({
           tone: 'error',
@@ -170,11 +217,9 @@ export function Deposit({ onDone }: DepositProps) {
         abortControllerRef.current = null
       }
     }
-  }, [n, address, sign, markPending, clearPending, changeStep, toast])
+  }
 
   const price = livePrice
-  const balance = USER_BALANCE_USDC
-
   const renderStep = (currentStep: DepositStep) => {
     switch (currentStep) {
       case 'amount':
@@ -185,12 +230,14 @@ export function Deposit({ onDone }: DepositProps) {
               value={amount}
               onChange={setAmount}
               label={t('amountLabel')}
-              currency="USDC"
-              balanceLabel={t('balanceLabel')}
-              balance={USER_BALANCE_USDC.toFixed(2)}
-              chips={QUICK_DEPOSIT_AMOUNTS_USDC}
-              cap={balance}
-              capMessage={t('capMessage', { cap: balance })}
+              currency={balance !== null ? 'USDC' : ''}
+              balanceLabel={balance !== null ? t('balanceLabel') : ''}
+              balance={balance !== null ? balance.toFixed(2) : 'Balance unavailable'}
+              chips={quickDepositAmounts}
+              min={minDeposit}
+              max={balance !== null ? Math.min(balance, maxTx) : maxTx}
+              cap={balance !== null ? balance : undefined}
+              capMessage={balance !== null ? t('capMessage', { cap: balance }) : undefined}
               maxChipLabel={t('maxChip')}
               capActionLabel={t('depositMaxAvailable')}
               preview={
@@ -227,7 +274,11 @@ export function Deposit({ onDone }: DepositProps) {
                         Using estimated rate
                       </span>
                     )}
-                    {t.rich('preview', { shares: formatDecimal(n / price, 4), price: formatSharePrice(price), num })}
+                    {t.rich('preview', {
+                      shares: formatDecimal(n / price, 4),
+                      price: formatSharePrice(price),
+                      num,
+                    })}
                     <span
                       style={{
                         display: 'block',
@@ -236,11 +287,10 @@ export function Deposit({ onDone }: DepositProps) {
                         color: 'var(--ink-60)',
                       }}
                     >
-                      Fee: &lt; $0.01 · Net proceeds: ≈{' '}
-                      {formatDecimal(roundToCents(n - DEPOSIT_FEE_USDC), 2)} USDC worth{' '}
+                      Network fee: {feeLabel} · Deposit: {formatDecimal(n, 2)} USDC worth{' '}
                       {formatDecimal(n / price, 4)} HBS (real-time)
                     </span>
-                    {n >= MIN_DEPOSIT_USDC && (
+                    {n >= minDeposit && (
                       <div
                         style={{
                           display: 'flex',
@@ -277,6 +327,12 @@ export function Deposit({ onDone }: DepositProps) {
               }
             />
             <p style={liqLine}>{t.rich('liquidLine', { b: strong })}</p>
+            <MemoInput
+              value={memo}
+              onChange={setMemo}
+              label={t('memoLabel')}
+              placeholder={t('memoPlaceholder')}
+            />
             <RecurringInvestmentOptions
               enabled={recurring}
               amount={n}
@@ -288,20 +344,55 @@ export function Deposit({ onDone }: DepositProps) {
               variant="primary"
               size="lg"
               style={{ width: '100%', marginTop: 20 }}
-              disabled={n < MIN_DEPOSIT_USDC || n > balance}
+              disabled={
+                n < minDeposit ||
+                (balance !== null && (n > balance || balance < minDeposit)) ||
+                n > maxTx ||
+                paused ||
+                !isMemoValid
+              }
               reason={
-                n > balance ? t('reasonExceeds') : n < MIN_DEPOSIT_USDC ? t('reasonMin') : undefined
+                paused
+                  ? 'Vault paused'
+                  : balance !== null && (n > balance || balance < minDeposit)
+                    ? t('reasonExceeds')
+                    : n > maxTx
+                      ? 'Amount exceeds pool limit'
+                      : n < minDeposit
+                        ? t('reasonMin', { min: formatDecimal(minDeposit, 2) })
+                        : !isMemoValid
+                          ? t('reasonMemoTooLong')
+                          : undefined
               }
               onClick={() => {
-                if (n < MIN_DEPOSIT_USDC || n > balance) {
-                  setTxError(n > balance ? 'amount_exceeds_balance' : 'amount_too_low')
+                if (
+                  n < minDeposit ||
+                  (balance !== null && (n > balance || balance < minDeposit)) ||
+                  n > maxTx ||
+                  paused ||
+                  !isMemoValid
+                ) {
+                  setTxError(
+                    paused
+                      ? 'vault_paused'
+                      : balance !== null && (n > balance || balance < minDeposit)
+                        ? 'amount_exceeds_balance'
+                        : n > maxTx
+                          ? 'amount_exceeds_max_tx'
+                          : !isMemoValid && n >= minDeposit
+                            ? 'memo_too_long'
+                            : 'amount_too_low',
+                  )
                   setTimeout(() => scrollToFirstError(document), 50)
                   return
                 }
                 changeStep('review')
               }}
             >
-              {n >= MIN_DEPOSIT_USDC && n <= balance
+              {n >= minDeposit &&
+              (balance === null || (n <= balance && balance >= minDeposit)) &&
+              n <= maxTx &&
+              !paused
                 ? t('investCta', { amount: n })
                 : t('investCtaEmpty')}
             </Button>
@@ -334,9 +425,9 @@ export function Deposit({ onDone }: DepositProps) {
                 <span style={{ fontFamily: 'var(--font-data)', fontWeight: 600 }}>
                   {formatDecimal(pendingDeposit.amount, 2)} USDC
                 </span>{' '}
-                (started {Math.floor((Date.now() - pendingDeposit.startedAt) / 1000)}s ago) has not
-                yet confirmed. Submitting again before it settles may result in a duplicate
-                investment. Check your portfolio before proceeding.{' '}
+                (started {Math.floor((now - pendingDeposit.startedAt) / 1000)}s ago) has not yet
+                confirmed. Submitting again before it settles may result in a duplicate investment.
+                Check your portfolio before proceeding.{' '}
                 <button
                   type="button"
                   onClick={clearPending}
@@ -370,8 +461,9 @@ export function Deposit({ onDone }: DepositProps) {
               <Row k={t('rowPay')} v={`${formatDecimal(n, 2)} USDC`} />
               <Row k={t('rowReceive')} v={`≈ ${formatDecimal(n / price, 4)} HBS`} />
               <Row k={t('rowPrice')} v={formatSharePrice(price)} />
-              <Row k="Price fetched" v={priceFetchedAt.toLocaleString()} />
-              <Row k={t('rowFee')} v="< $0.01" />
+              <Row k="Price fetched" v={formatDateTime(priceFetchedAt, locale)} />
+              <Row k="Network fee" v={feeLabel} />
+              {memo.trim() && <Row k={t('rowMemo')} v={memo.trim()} />}
             </div>
             <div
               style={{
@@ -393,7 +485,7 @@ export function Deposit({ onDone }: DepositProps) {
               >
                 {isRateStale
                   ? `Rate updated ${rateAgeSeconds}s ago — may be outdated. Refresh before confirming.`
-                  : `Live rate — updated ${rateAgeSeconds}s ago at ${priceFetchedAt.toLocaleTimeString()}`}
+                  : `Live rate — updated ${rateAgeSeconds}s ago at ${formatTime(priceFetchedAt, locale)}`}
               </p>
               <button
                 type="button"
@@ -432,6 +524,43 @@ export function Deposit({ onDone }: DepositProps) {
                 to get the latest price before confirming.
               </div>
             )}
+            <div style={{ marginBottom: 16 }}>
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--type-small)',
+                  color: 'var(--ink-60)',
+                  cursor: 'pointer',
+                }}
+              >
+                <span>Slippage tolerance</span>
+                <select
+                  value={slippageTolerance}
+                  onChange={(e) => setSlippageTolerance(Number(e.target.value))}
+                  style={{
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 'var(--type-small)',
+                    padding: '6px 10px',
+                    borderRadius: 'var(--radius-input)',
+                    border: '1px solid var(--ink-12)',
+                    background: 'var(--surface)',
+                    color: 'var(--ink)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <option value={0.001}>0.1%</option>
+                  <option value={0.005}>0.5% (default)</option>
+                  <option value={0.01}>1%</option>
+                  <option value={0.02}>2%</option>
+                </select>
+                <span style={{ color: 'var(--ink-40)', fontSize: 'var(--type-caption)' }}>
+                  Min shares: {formatDecimal((n / price) * (1 - slippageTolerance), 4)} HBS
+                </span>
+              </label>
+            </div>
             <RecurringInvestmentOptions
               enabled={recurring}
               amount={n}
@@ -454,12 +583,7 @@ export function Deposit({ onDone }: DepositProps) {
               <Button variant="ghost" onClick={() => changeStep('amount')}>
                 {t('back')}
               </Button>
-              <Button
-                variant="primary"
-                size="lg"
-                style={{ flex: 1 }}
-                onClick={handleSubmitDeposit}
-              >
+              <Button variant="primary" size="lg" style={{ flex: 1 }} onClick={handleSubmitDeposit}>
                 {t('confirm')}
               </Button>
             </div>
