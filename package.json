@@ -24,6 +24,7 @@
     "test": "vitest run",
     "test:ui": "vitest --ui",
     "test:e2e": "playwright test",
+    "test:e2e:production": "CSP_MODE=enforce playwright test --project=production e2e/security-headers.spec.ts",
     "bundle:check": "node scripts/check-bundle-size.js",
     "typecheck:coverage": "node scripts/check-type-coverage.js",
     "prepare": "husky"
@@ -40,6 +41,7 @@
     "three": "^0.185.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/eslintrc": "^3.3.5",
     "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.9.1",

@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from 'next'
-import { getLocale, getMessages } from 'next-intl/server'
+import { getLocale, getMessages, getTranslations } from 'next-intl/server'
 import dynamic from 'next/dynamic'
 import { Suspense } from 'react'
 import { Providers } from './providers'
@@ -59,6 +59,7 @@ export const viewport: Viewport = {
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const locale = await getLocale()
   const messages = await getMessages()
+  const t = await getTranslations('Shell')
 
   return (
     <html
@@ -74,7 +75,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <LocaleProvider initialLocale={locale as Locale} initialMessages={messages as Messages}>
           <Providers>
             <a href="#main-content" className="hb-skip-link">
-              Skip to content
+              {t('skipToContent')}
             </a>
             <Suspense fallback={null}>
               <TopBar />

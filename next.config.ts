@@ -1,8 +1,17 @@
 import type { NextConfig } from 'next'
 import createNextIntlPlugin from 'next-intl/plugin'
+import { getSecurityHeaders } from './src/lib/securityHeaders'
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: getSecurityHeaders(),
+      },
+    ]
+  },
   webpack(config) {
     const splitChunks = config.optimization.splitChunks || {}
     config.optimization.splitChunks = {

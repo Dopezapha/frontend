@@ -134,6 +134,26 @@ session state the flow needs, `page.goto()` the route, then assert each step
 of the flow in order with `expect(locator).toBeVisible()` /
 `toBeDisabled()`.
 
+### Production CSP and security headers
+
+To test CSP and security headers against an enforce-mode production build without colliding with the backend API on port 3001:
+
+```bash
+bun run test:e2e:production
+```
+
+This starts a fresh production server on dedicated port 3200 (configurable via `E2E_PRODUCTION_PORT`), disables server reuse (`reuseExistingServer: false`), and verifies security headers without interference from `.env.local` or running backends.
+
+### Automated accessibility checks (Axe)
+
+Heliobond includes automated accessibility tests powered by `@axe-core/playwright` in `e2e/a11y.spec.ts`. The audit checks all public routes and authenticated flows across both light and dark themes against WCAG 2.0 and 2.1 AA rules.
+
+```bash
+bun run test:e2e    # runs the full Playwright suite including a11y specs
+```
+
+The test fails on any serious or critical violation. Detailed results and violation objects are attached to the Playwright test report. Known pre-existing issues are tracked in the commented `KNOWN_VIOLATIONS` allowlist with links to their tracking GitHub issues.
+
 ## Development workflow
 
 1. Branch off `main`: `git checkout -b <type>/<short-description>` (e.g. `feat/withdraw-max-chip`, `fix/helio-glow`, `i18n/creator-screens`).

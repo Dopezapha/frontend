@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo } from 'react'
 import Link from 'next/link'
+import { useTranslations } from 'next-intl'
 import { Helio } from '../brand/Helio'
 
 /**
@@ -18,6 +19,7 @@ export default function GlobalError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  const t = useTranslations('Errors')
   const isOffline = useMemo(
     () => /stellar|offline|network|connection|sync/i.test(error.message ?? ''),
     [error.message]
@@ -55,7 +57,7 @@ export default function GlobalError({
           textTransform: 'uppercase',
         }}
       >
-        {isOffline ? "You're offline" : "Something went wrong"}
+        {isOffline ? t('offlineEyebrow') : t('errorEyebrow')}
       </p>
 
       <h1
@@ -69,7 +71,7 @@ export default function GlobalError({
           margin: '0 0 14px',
         }}
       >
-        {isOffline ? 'Lost connection to Stellar' : 'An unexpected error occurred'}
+        {isOffline ? t('offlineTitle') : t('errorTitle')}
       </h1>
 
       <p
@@ -82,9 +84,7 @@ export default function GlobalError({
           margin: '0 0 8px',
         }}
       >
-        {isOffline
-          ? "The app couldn't reach the Stellar node. Check your connection or try again. You can still access cached views."
-          : "The application hit an unexpected problem. You can try recovering, or go back to the home page."}
+        {isOffline ? t('offlineBody') : t('errorBody')}
       </p>
 
       {error.digest && (
@@ -96,7 +96,7 @@ export default function GlobalError({
             margin: '0 0 32px',
           }}
         >
-          Error ref: {error.digest}
+          {t('errorRef', { digest: error.digest })}
         </p>
       )}
       {!error.digest && <div style={{ marginBottom: 32 }} />}
@@ -123,7 +123,7 @@ export default function GlobalError({
             transition: 'background var(--dur-press) var(--ease-out)',
           }}
         >
-          Try again
+          {t('tryAgain')}
         </button>
 
         <Link
@@ -146,7 +146,7 @@ export default function GlobalError({
             transition: 'background var(--dur-press) var(--ease-out)',
           }}
         >
-          {isOffline ? 'View cached views' : 'Go home'}
+          {isOffline ? t('viewCached') : t('goHome')}
         </Link>
       </div>
     </main>

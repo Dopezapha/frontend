@@ -1,6 +1,7 @@
 'use client'
 import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
+import { useTranslations } from 'next-intl'
 import { ThemeProvider } from '../theme/ThemeProvider'
 import { WalletProvider, useWallet } from '../wallet/WalletProvider'
 import { ToastProvider, SessionTimeoutModal, useToast } from '../components'
@@ -21,6 +22,7 @@ function Analytics() {
 }
 
 function SessionWatcher() {
+  const t = useTranslations('SessionTimeout')
   const { connected, disconnect } = useWallet()
   const { toast } = useToast()
 
@@ -30,8 +32,8 @@ function SessionWatcher() {
       disconnect()
       toast({
         tone: 'error',
-        title: 'Session expired',
-        message: 'You have been disconnected due to inactivity.',
+        title: t('expiredTitle'),
+        message: t('expiredBody'),
       })
     },
   })
@@ -47,6 +49,7 @@ function SessionWatcher() {
 }
 
 function OfflineBanner() {
+  const t = useTranslations('Shell')
   const { connected } = useWallet()
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== 'undefined' ? navigator.onLine : true,
@@ -137,7 +140,7 @@ function OfflineBanner() {
         fontSize: '0.875rem',
       }}
     >
-      <strong>Offline</strong> &mdash; Showing cached data. Attempting to reconnect...
+      {t('offlineBanner')}
     </div>
   )
 }

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import en from '../../messages/en.json'
 import fr from '../../messages/fr.json'
 import es from '../../messages/es.json'
+import pt from '../../messages/pt.json'
 import ar from '../../messages/ar.json'
 
 function getLeafKeys(obj: Record<string, unknown>, prefix = ''): string[] {
@@ -22,6 +23,7 @@ describe('Message catalog parity', () => {
   it.each([
     ['fr.json', fr],
     ['es.json', es],
+    ['pt.json', pt],
     ['ar.json', ar],
   ] as const)('en.json and %s have identical key sets', (_name, catalog) => {
     const enKeys = getLeafKeys(en).sort()

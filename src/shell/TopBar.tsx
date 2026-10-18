@@ -142,7 +142,7 @@ export function TopBar() {
     >
       <Link
         href="/"
-        aria-label="Heliobond — home"
+        aria-label={t('brandHome')}
         style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}
       >
         {mounted && pathname === '/' ? <Mark /> : null}
@@ -188,7 +188,7 @@ export function TopBar() {
       <div style={{ marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
         <span
           role="status"
-          aria-label={networkOnline ? t('networkStatus') : 'Offline'}
+          aria-label={networkOnline ? t('networkStatus') : t('offline')}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -211,7 +211,7 @@ export function TopBar() {
               boxShadow: networkOnline ? '0 0 0 3px var(--growth-12)' : 'none',
             }}
           />
-          {networkOnline ? t('testnet') : 'Offline'}
+          {networkOnline ? t('testnet') : t('offline')}
         </span>
 
         <button
@@ -260,7 +260,7 @@ export function TopBar() {
           fontWeight: 500,
         }}
       >
-        Offline — showing cached data
+        {t('offlineCached')}
       </div>
     )}
     </>
